@@ -9,6 +9,8 @@ interface HomeViewProps {
   onToggleLang: (lang: Language) => void;
   onCreateRoom: () => void;
   onJoinRoom: () => void;
+  isCreatingRoom: boolean;
+  errorMessage: string;
 }
 
 export const HomeView: React.FC<HomeViewProps> = ({
@@ -16,6 +18,8 @@ export const HomeView: React.FC<HomeViewProps> = ({
   onToggleLang,
   onCreateRoom,
   onJoinRoom,
+  isCreatingRoom,
+  errorMessage,
 }) => {
   const t = TRANSLATIONS[lang];
 
@@ -57,17 +61,20 @@ export const HomeView: React.FC<HomeViewProps> = ({
           <div className="w-full space-y-3">
           <button
             onClick={onCreateRoom}
-            className="party-primary w-full py-4 px-6 text-white text-lg font-bold rounded-2xl transition active:scale-[0.99] cursor-pointer"
+            disabled={isCreatingRoom}
+            className="party-primary w-full py-4 px-6 text-white text-lg font-bold rounded-2xl transition active:scale-[0.99] cursor-pointer disabled:opacity-60"
           >
-            {t.createRoom}
+            {isCreatingRoom ? t.connecting : t.createRoom}
           </button>
 
           <button
             onClick={onJoinRoom}
-            className="party-secondary w-full py-4 px-6 text-lg font-bold rounded-2xl transition active:scale-[0.99] cursor-pointer"
+            disabled={isCreatingRoom}
+            className="party-secondary w-full py-4 px-6 text-lg font-bold rounded-2xl transition active:scale-[0.99] cursor-pointer disabled:opacity-60"
           >
             {t.joinRoom}
           </button>
+          {errorMessage && <p role="alert" className="text-sm text-rose-300">{errorMessage}</p>}
           </div>
         </section>
       </main>

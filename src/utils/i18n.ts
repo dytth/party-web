@@ -81,10 +81,6 @@ export const TRANSLATIONS = {
     lookAtHostScreen: 'Hãy nhìn lên màn hình chính và chờ Host bắt đầu trò chơi...',
     hostReloadNotice: 'Nếu Host vô tình tải lại trang, kết nối sẽ tự động phục hồi trong giây lát.',
     leaveRoom: 'Rời khỏi phòng',
-    changeName: 'Đổi tên',
-    changeNameTitle: 'Đổi tên người chơi',
-    changeNamePlaceholder: 'Nhập tên mới (tối đa 15 ký tự)...',
-    saveName: 'Lưu thay đổi',
 
     // Game 1: The Lost Spy
     game1Title: 'Điệp Viên Lạc Lối',
@@ -240,10 +236,6 @@ export const TRANSLATIONS = {
     lookAtHostScreen: 'Look up at the main screen and wait for the Host to start...',
     hostReloadNotice: 'If the Host refreshes the page, connection will restore automatically.',
     leaveRoom: 'Leave Room',
-    changeName: 'Change Name',
-    changeNameTitle: 'Change Player Name',
-    changeNamePlaceholder: 'Enter new name (max 15 chars)...',
-    saveName: 'Save Changes',
 
     // Game 1: The Lost Spy
     game1Title: 'The Lost Spy',

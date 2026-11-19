@@ -28,12 +28,7 @@ export const HostLobbyView: React.FC<HostLobbyViewProps> = ({
   onKickPlayer,
 }) => {
   const t = TRANSLATIONS[lang];
-  const isLocalHost = typeof window !== 'undefined' && (window.location.hostname === 'localhost' || window.location.hostname === '127.0.0.1');
-  const [preferPublicDomain, setPreferPublicDomain] = React.useState(isLocalHost);
-  const productionUrl = `https://party.circuscyber.com?join=${roomCode}`;
-  const currentOriginUrl = `${window.location.origin}${window.location.pathname}?join=${roomCode}`;
-  const joinUrl = (isLocalHost && preferPublicDomain) ? productionUrl : currentOriginUrl;
-
+  const joinUrl = `${window.location.origin}${window.location.pathname}?join=${roomCode}`;
   const prevPlayersCount = useRef(players.length);
 
   useEffect(() => {
@@ -92,19 +87,6 @@ export const HostLobbyView: React.FC<HostLobbyViewProps> = ({
           <span className="text-xs text-neutral-400">
             {t.scanQrSub}
           </span>
-
-          {isLocalHost && (
-            <div className="mt-3 p-2 bg-amber-500/10 border border-amber-400/30 rounded-xl text-[11px] text-amber-300 text-center max-w-xs">
-              <span>💡 Link QR quét từ điện thoại:</span>
-              <button
-                type="button"
-                onClick={() => setPreferPublicDomain(!preferPublicDomain)}
-                className="block font-mono text-[10px] text-cyan-300 underline mt-0.5 break-all cursor-pointer hover:text-cyan-200"
-              >
-                {preferPublicDomain ? 'Đang dùng link Cloudflare Pages (Khuyên dùng)' : 'Đang dùng link Localhost'}
-              </button>
-            </div>
-          )}
         </div>
 
         {/* Right Column: Players List & Start Action */}

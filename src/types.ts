@@ -12,8 +12,6 @@ export type NetworkMessage =
   | { type: 'RECONNECT'; playerId: string; name: string }
   | { type: 'JOINED'; roomCode: string; playerId: string; name: string; stage?: string }
   | { type: 'JOIN_REJECTED'; reason: 'ROOM_FULL' | 'GAME_IN_PROGRESS' | 'INVALID_NAME' }
-  | { type: 'CHANGE_NAME'; playerId: string; newName: string }
-  | { type: 'NAME_CHANGED'; playerId: string; newName: string }
   | { type: 'PLAYERS_UPDATE'; players: Player[] }
   | { type: 'HOST_STAGE_CHANGE'; stage: string; gameId?: string }
   | { type: 'SPY_UPDATE'; clientState: TheLostSpyClientState }

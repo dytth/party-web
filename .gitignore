@@ -2,7 +2,11 @@ node_modules/
 dist/
 .vite/
 *.log
-.DS_Store
-*.local
+.wrangler/
+deploy-party.bat
+.dev.vars*
 .env*
-tsconfig.tsbuildinfo
+!.env.example
+__pycache__/
+*.pyc
+

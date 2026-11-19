@@ -23,13 +23,11 @@ export function PlayerSuiteGame({
   lang,
   onToggleLang,
   onAction,
-  onChangeName,
 }: {
   state: SuiteClientState;
   lang: Language;
   onToggleLang: (lang: Language) => void;
   onAction: (a: SuiteAction) => void;
-  onChangeName?: (newName: string) => void;
 }) {
   if (lang === 'en' && state.secret?.topicEn) state = { ...state, secret: { ...state.secret, topic: state.secret.topicEn } };
   const g = state.game,
@@ -52,25 +50,7 @@ export function PlayerSuiteGame({
     <main className="party-shell min-h-screen p-4 text-white">
       <div className="max-w-xl mx-auto">
         <div className="flex items-center justify-between mb-4">
-          <div className="flex items-center gap-2">
-            <p className="party-kicker">MOBILE CONTROLLER</p>
-            <span className="text-xs font-bold text-slate-300">({name(me)})</span>
-            {onChangeName && (
-              <button
-                type="button"
-                onClick={() => {
-                  const current = name(me);
-                  const newName = window.prompt(vi ? 'Nhập tên mới của bạn (tối đa 15 ký tự):' : 'Enter your new name (max 15 chars):', current);
-                  if (newName && newName.trim() && newName.trim() !== current) {
-                    onChangeName(newName.trim().slice(0, 15));
-                  }
-                }}
-                className="text-[10px] text-slate-400 hover:text-cyan-300 underline cursor-pointer"
-              >
-                {vi ? 'Đổi tên' : 'Edit'}
-              </button>
-            )}
-          </div>
+          <p className="party-kicker">MOBILE CONTROLLER</p>
           <LanguageToggle currentLang={lang} onToggle={onToggleLang} />
         </div>
         <h1 className="text-3xl font-black mb-5">{titleOf(g.gameId, vi)}</h1>

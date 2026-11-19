@@ -1,5 +1,6 @@
 import React, { useState } from 'react';
 import { sanitizeRoomCode } from '../utils/roomCode';
+import { MAX_CONNECTION_RETRIES } from '../utils/ice';
 import { Language, TRANSLATIONS } from '../utils/i18n';
 import { LanguageToggle } from './LanguageToggle';
 import { Footer } from './Footer';
@@ -11,6 +12,7 @@ interface JoinViewProps {
   onJoin: (roomCode: string, playerName: string) => void;
   onBack: () => void;
   isLoading?: boolean;
+  reconnectAttempt?: number;
   errorMessage?: string;
 }
 
@@ -21,6 +23,7 @@ export const JoinView: React.FC<JoinViewProps> = ({
   onJoin,
   onBack,
   isLoading = false,
+  reconnectAttempt = 0,
   errorMessage = '',
 }) => {
   const t = TRANSLATIONS[lang];
@@ -106,13 +109,12 @@ export const JoinView: React.FC<JoinViewProps> = ({
               disabled={isLoading}
               className="party-primary w-full py-3.5 px-6 text-white font-bold rounded-xl transition active:scale-[0.99] disabled:opacity-50 cursor-pointer text-base"
             >
-              {isLoading ? t.connecting : t.confirm}
+              {reconnectAttempt ? `${t.reconnecting} (${reconnectAttempt}/${MAX_CONNECTION_RETRIES})` : isLoading ? t.connecting : t.confirm}
             </button>
 
             <button
               type="button"
               onClick={onBack}
-              disabled={isLoading}
               className="w-full py-2.5 px-4 text-sm font-medium text-slate-400 hover:text-white transition cursor-pointer"
             >
               {t.back}

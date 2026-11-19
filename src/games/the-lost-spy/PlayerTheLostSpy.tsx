@@ -1,5 +1,4 @@
 import React, { useState, useEffect } from 'react';
-import { Edit2 } from 'lucide-react';
 import { TheLostSpyClientState } from './types';
 import { Language, TRANSLATIONS } from '../../utils/i18n';
 import { LanguageToggle } from '../../components/LanguageToggle';
@@ -12,7 +11,6 @@ interface PlayerTheLostSpyProps {
   playerName: string;
   onVote: (targetId: string) => void;
   onGuessWord: (guess: string) => void;
-  onChangeName?: (newName: string) => void;
 }
 
 export const PlayerTheLostSpy: React.FC<PlayerTheLostSpyProps> = ({
@@ -22,13 +20,10 @@ export const PlayerTheLostSpy: React.FC<PlayerTheLostSpyProps> = ({
   playerName,
   onVote,
   onGuessWord,
-  onChangeName,
 }) => {
   const t = TRANSLATIONS[lang];
   const [showSecretWord, setShowSecretWord] = useState<boolean>(false);
   const [selectedTargetId, setSelectedTargetId] = useState<string | null>(null);
-  const [editingName, setEditingName] = useState<boolean>(false);
-  const [inputName, setInputName] = useState<string>(playerName);
 
   // Modal for guessing the original word
   const [showGuessModal, setShowGuessModal] = useState<boolean>(false);
@@ -71,22 +66,7 @@ export const PlayerTheLostSpy: React.FC<PlayerTheLostSpyProps> = ({
           <span className="text-[11px] font-semibold uppercase tracking-wider text-neutral-400">
             {t.game1Title} • {t.round} {clientState.round}
           </span>
-          <div className="flex items-center gap-1.5">
-            <span className="text-base font-bold text-neutral-900">{playerName}</span>
-            {onChangeName && (
-              <button
-                type="button"
-                onClick={() => {
-                  setInputName(playerName);
-                  setEditingName(true);
-                }}
-                className="p-1 rounded-md text-neutral-400 hover:text-neutral-700 hover:bg-neutral-200/60 transition cursor-pointer"
-                title={t.changeName}
-              >
-                <Edit2 size={12} />
-              </button>
-            )}
-          </div>
+          <div className="text-base font-bold text-neutral-900">{playerName}</div>
         </div>
 
         <div className="flex items-center gap-2">
@@ -375,58 +355,6 @@ export const PlayerTheLostSpy: React.FC<PlayerTheLostSpyProps> = ({
                 </button>
               </div>
             </form>
-          </div>
-        </div>
-      )}
-
-      {/* Edit Name Modal */}
-      {editingName && (
-        <div className="fixed inset-0 z-50 bg-black/60 backdrop-blur-xs flex items-center justify-center p-4">
-          <div className="bg-white rounded-3xl p-6 max-w-xs w-full text-left shadow-2xl border border-neutral-100 animate-in fade-in zoom-in-95">
-            <h3 className="font-black text-lg text-neutral-900 mb-1">{t.changeNameTitle}</h3>
-            <p className="text-xs text-neutral-500 mb-4">{t.namePlaceholder}</p>
-            <input
-              type="text"
-              value={inputName}
-              onChange={(e) => setInputName(e.target.value)}
-              maxLength={15}
-              autoFocus
-              placeholder={t.changeNamePlaceholder}
-              className="w-full px-4 py-3 rounded-xl border border-neutral-300 focus:outline-none focus:ring-2 focus:ring-black text-neutral-900 font-semibold mb-2 text-sm"
-              onKeyDown={(e) => {
-                if (e.key === 'Enter') {
-                  const trimmed = inputName.trim().slice(0, 15);
-                  if (trimmed && onChangeName) onChangeName(trimmed);
-                  setEditingName(false);
-                }
-                if (e.key === 'Escape') setEditingName(false);
-              }}
-            />
-            <div className="flex justify-between items-center text-[11px] text-neutral-400 mb-4">
-              <span>{inputName.trim().length}/15</span>
-              {inputName.trim().length === 0 && <span className="text-rose-500">{t.errorNoName}</span>}
-            </div>
-            <div className="flex gap-2">
-              <button
-                type="button"
-                onClick={() => setEditingName(false)}
-                className="flex-1 py-2.5 rounded-xl border border-neutral-200 text-neutral-600 font-bold text-xs hover:bg-neutral-50 transition cursor-pointer"
-              >
-                {t.cancel}
-              </button>
-              <button
-                type="button"
-                onClick={() => {
-                  const trimmed = inputName.trim().slice(0, 15);
-                  if (trimmed && onChangeName) onChangeName(trimmed);
-                  setEditingName(false);
-                }}
-                disabled={!inputName.trim()}
-                className="flex-1 py-2.5 rounded-xl bg-black text-white font-bold text-xs shadow-md disabled:opacity-50 transition cursor-pointer"
-              >
-                {t.saveName}
-              </button>
-            </div>
           </div>
         </div>
       )}

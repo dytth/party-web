@@ -1,7 +1,8 @@
-import React, { useState, useEffect, useRef, useCallback } from 'react';
+import React, { lazy, useState, useEffect, useRef, useCallback } from 'react';
 import Peer, { DataConnection } from 'peerjs';
 import { Player, NetworkMessage } from './types';
 import { generateRoomCode, sanitizeRoomCode } from './utils/roomCode';
+import { loadIceConfiguration, MAX_CONNECTION_RETRIES } from './utils/ice';
 import {
   savePlayerSession,
   getPlayerSession,
@@ -16,22 +17,27 @@ import { HostLobbyView } from './components/HostLobbyView';
 import { HostGameSelectView } from './components/HostGameSelectView';
 import { JoinView } from './components/JoinView';
 import { PlayerWaitingView } from './components/PlayerWaitingView';
-import { HostTheLostSpy } from './games/the-lost-spy/HostTheLostSpy';
-import { PlayerTheLostSpy } from './games/the-lost-spy/PlayerTheLostSpy';
 import {
   TheLostSpyGameState,
   TheLostSpyClientState,
 } from './games/the-lost-spy/types';
-import { getRandomWordPair, checkGuessMatch } from './games/the-lost-spy/words';
 import { applyVote, createGameState, determineWinner, getAliveTurnOrder, resolveVotes } from './games/the-lost-spy/engine';
 import { LOST_SPY_RULES } from './games/the-lost-spy/config';
 import { Language, getSavedLanguage, saveLanguage } from './utils/i18n';
-import { HostSuiteGame } from './games/suite/HostSuiteGame';
-import { PlayerSuiteGame } from './games/suite/PlayerSuiteGame';
-import { RTC_CONFIGURATION } from './utils/webrtcConfig';
-import { playHostSound } from './utils/sound';
-import { applySuiteAction, clientState, createSuiteGame, nextSuiteRound } from './games/suite/engine';
 import type { SuiteAction, SuiteClientState, SuiteGameId, SuiteGameState } from './games/suite/types';
+
+const HostTheLostSpy = lazy(() => import('./games/the-lost-spy/HostTheLostSpy').then(({ HostTheLostSpy }) => ({ default: HostTheLostSpy })));
+const PlayerTheLostSpy = lazy(() => import('./games/the-lost-spy/PlayerTheLostSpy').then(({ PlayerTheLostSpy }) => ({ default: PlayerTheLostSpy })));
+const HostSuiteGame = lazy(() => import('./games/suite/HostSuiteGame').then(({ HostSuiteGame }) => ({ default: HostSuiteGame })));
+const PlayerSuiteGame = lazy(() => import('./games/suite/PlayerSuiteGame').then(({ PlayerSuiteGame }) => ({ default: PlayerSuiteGame })));
+
+async function loadHostGames() {
+  const [words, suite] = await Promise.all([
+    import('./games/the-lost-spy/words'),
+    import('./games/suite/engine'),
+  ]);
+  return { words, suite };
+}
 
 type AppView =
   | 'HOME'
@@ -70,10 +76,13 @@ export const App: React.FC = () => {
 
   // References
   const peerRef = useRef<Peer | null>(null);
+  const hostGamesRef = useRef<Awaited<ReturnType<typeof loadHostGames>> | null>(null);
+  const connectionAttemptRef = useRef<AbortController | null>(null);
   const hostConnectionsRef = useRef<Map<string, DataConnection>>(new Map());
   const playerConnRef = useRef<DataConnection | null>(null);
-  const reconnectTimerRef = useRef<any>(null);
-  const isKickedRef = useRef<boolean>(false);
+  const reconnectTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const langRef = useRef(lang);
+  langRef.current = lang;
 
   const currentViewRef = useRef<AppView>(currentView);
   currentViewRef.current = currentView;
@@ -87,16 +96,17 @@ export const App: React.FC = () => {
   suiteHostStateRef.current = suiteHostState;
 
   const cleanupPeer = useCallback(() => {
+    connectionAttemptRef.current?.abort();
+    connectionAttemptRef.current = null;
     if (reconnectTimerRef.current) {
       clearTimeout(reconnectTimerRef.current);
       reconnectTimerRef.current = null;
     }
-    if (peerRef.current) {
-      peerRef.current.destroy();
-      peerRef.current = null;
-    }
     hostConnectionsRef.current.clear();
     playerConnRef.current = null;
+    const peer = peerRef.current;
+    peerRef.current = null;
+    peer?.destroy();
   }, []);
 
   useEffect(() => () => cleanupPeer(), [cleanupPeer]);
@@ -161,15 +171,17 @@ export const App: React.FC = () => {
   };
 
   const broadcastSuiteState = (gState: SuiteGameState) => {
+    const suite = hostGamesRef.current?.suite;
+    if (!suite) return;
     hostConnectionsRef.current.forEach((conn, pId) => {
-      try { conn.send({ type: 'SUITE_UPDATE', clientState: clientState(gState, pId) } as NetworkMessage); } catch {}
+      try { conn.send({ type: 'SUITE_UPDATE', clientState: suite.clientState(gState, pId) } as NetworkMessage); } catch {}
     });
   };
 
   // ----------------------------------------------------
   // HOST: INITIALIZE OR RESTORE ROOM
   // ----------------------------------------------------
-  const startHostRoom = useCallback((
+  const startHostRoom = useCallback(async (
     codeToUse: string,
     initialPlayers: Player[] = [],
     stage: AppView = 'HOST_LOBBY',
@@ -180,14 +192,36 @@ export const App: React.FC = () => {
     setIsLoading(true);
     setErrorMessage('');
 
-    const cleanCode = sanitizeRoomCode(codeToUse);
-    const peerId = `ccparty-${cleanCode.toLowerCase()}`;
-    const peer = new Peer(peerId, {
-      debug: 1,
-      config: RTC_CONFIGURATION,
-    });
+    const peerId = `ccparty-${codeToUse.toLowerCase()}`;
+    const attempt = new AbortController();
+    connectionAttemptRef.current = attempt;
+    let suite: NonNullable<typeof hostGamesRef.current>['suite'];
+    let peer: Peer;
+    try {
+      const [config, games] = await Promise.all([loadIceConfiguration(attempt.signal), loadHostGames()]);
+      if (attempt.signal.aborted) return;
+      hostGamesRef.current = games;
+      suite = games.suite;
+      peer = new Peer(peerId, { debug: 1, config });
+    } catch {
+      if (attempt.signal.aborted) return;
+      cleanupPeer();
+      setIsLoading(false);
+      setErrorMessage(langRef.current === 'vi' ? 'Không thể tải dữ liệu phòng. Hãy kiểm tra mạng rồi thử lại.' : 'Could not load room data. Check your connection and try again.');
+      return;
+    }
 
-    peer.on('open', () => {
+    let roomOpened = false;
+    const hostTimeout = setTimeout(() => {
+      cleanupPeer();
+      setIsLoading(false);
+      setErrorMessage(langRef.current === 'vi' ? 'Tạo phòng quá thời gian. Hãy kiểm tra mạng rồi thử lại.' : 'Room creation timed out. Check your connection and try again.');
+    }, 15000);
+    attempt.signal.addEventListener('abort', () => clearTimeout(hostTimeout), { once: true });
+
+    peer.once('open', () => {
+      clearTimeout(hostTimeout);
+      roomOpened = true;
       setRoomCode(codeToUse);
       const restored = initialPlayers.map((p) => ({ ...p, isOnline: false }));
       setPlayers(restored);
@@ -210,6 +244,7 @@ export const App: React.FC = () => {
       let registeredPlayerId = '';
 
       conn.on('data', (data) => {
+        if (attempt.signal.aborted || (registeredPlayerId && hostConnectionsRef.current.get(registeredPlayerId) !== conn)) return;
         const msg = data as NetworkMessage;
 
         if (msg.type === 'JOIN' || msg.type === 'RECONNECT') {
@@ -230,7 +265,9 @@ export const App: React.FC = () => {
           }
 
           registeredPlayerId = msg.playerId;
+          const previousConnection = hostConnectionsRef.current.get(msg.playerId);
           hostConnectionsRef.current.set(msg.playerId, conn);
+          if (previousConnection !== conn) previousConnection?.close();
 
           setPlayers((prev) => {
             const index = prev.findIndex((p) => p.id === msg.playerId);
@@ -269,7 +306,7 @@ export const App: React.FC = () => {
             } as NetworkMessage);
           }
           if (suiteHostStateRef.current && currentViewRef.current === 'HOST_GAME_SUITE') {
-            conn.send({ type: 'SUITE_UPDATE', clientState: clientState(suiteHostStateRef.current, msg.playerId) } as NetworkMessage);
+            conn.send({ type: 'SUITE_UPDATE', clientState: suite.clientState(suiteHostStateRef.current, msg.playerId) } as NetworkMessage);
           }
         } else if (msg.type === 'SPY_VOTE') {
           if (registeredPlayerId && registeredPlayerId === msg.voterId && game1HostStateRef.current) {
@@ -284,75 +321,14 @@ export const App: React.FC = () => {
           }
         } else if (msg.type === 'SUITE_ACTION') {
           if (registeredPlayerId && registeredPlayerId === msg.playerId && suiteHostStateRef.current) {
-            const updated = applySuiteAction(suiteHostStateRef.current, registeredPlayerId, msg.action);
+            const updated = suite.applySuiteAction(suiteHostStateRef.current, registeredPlayerId, msg.action);
             if (updated !== suiteHostStateRef.current) { setSuiteHostState(updated); suiteHostStateRef.current = updated; broadcastSuiteState(updated); }
           }
-        } else if (msg.type === 'CHANGE_NAME') {
-          const cleanName = msg.newName.trim().slice(0, LOST_SPY_RULES.maxNameLength);
-          if (!cleanName) return;
-
-          setPlayers((prev) => {
-            const updated = prev.map((p) => (p.id === msg.playerId ? { ...p, name: cleanName } : p));
-            saveHostSession({
-              roomCode: cleanCode,
-              players: updated,
-              stage: currentViewRef.current,
-              game1State: game1HostStateRef.current,
-              suiteState: suiteHostStateRef.current,
-            });
-            return updated;
-          });
-
-          if (game1HostStateRef.current && game1HostStateRef.current.playerRoles[msg.playerId]) {
-            setGame1HostState((prev) => {
-              if (!prev || !prev.playerRoles[msg.playerId]) return prev;
-              const updated: TheLostSpyGameState = {
-                ...prev,
-                playerRoles: {
-                  ...prev.playerRoles,
-                  [msg.playerId]: {
-                    ...prev.playerRoles[msg.playerId],
-                    name: cleanName,
-                  },
-                },
-              };
-              return updated;
-            });
-          }
-
-          if (suiteHostStateRef.current) {
-            setSuiteHostState((prev) => {
-              if (!prev) return prev;
-              const updated: SuiteGameState = {
-                ...prev,
-                players: prev.players.map((p) => (p.id === msg.playerId ? { ...p, name: cleanName } : p)),
-              };
-              return updated;
-            });
-          }
-
-          conn.send({
-            type: 'NAME_CHANGED',
-            playerId: msg.playerId,
-            newName: cleanName,
-          } as NetworkMessage);
-
-          const updatedPlayers = playersRef.current.map((p) => (p.id === msg.playerId ? { ...p, name: cleanName } : p));
-          hostConnectionsRef.current.forEach((c) => {
-            try {
-              c.send({
-                type: 'PLAYERS_UPDATE',
-                players: updatedPlayers,
-              } as NetworkMessage);
-            } catch {}
-          });
-
-          playHostSound('pop');
         }
       });
 
-      conn.on('close', () => {
-        if (registeredPlayerId) {
+      const markOffline = () => {
+        if (registeredPlayerId && hostConnectionsRef.current.get(registeredPlayerId) === conn) {
           hostConnectionsRef.current.delete(registeredPlayerId);
           setPlayers((prev) => {
             const updated = prev.map((p) =>
@@ -368,46 +344,19 @@ export const App: React.FC = () => {
             return updated;
           });
         }
-      });
-
-      conn.on('error', () => {
-        if (registeredPlayerId) {
-          hostConnectionsRef.current.delete(registeredPlayerId);
-          setPlayers((prev) => {
-            const updated = prev.map((p) =>
-              p.id === registeredPlayerId ? { ...p, isOnline: false } : p
-            );
-            saveHostSession({
-              roomCode: codeToUse,
-              players: updated,
-              stage: currentViewRef.current,
-              game1State: game1HostStateRef.current,
-              suiteState: suiteHostStateRef.current,
-            });
-            return updated;
-          });
-        }
-      });
-    });
-
-    peer.on('disconnected', () => {
-      console.warn('Host lost signaling connection, reconnecting...');
-      if (peer && !peer.destroyed) {
-        try {
-          peer.reconnect();
-        } catch (e) {
-          console.error('Reconnect failed', e);
-        }
-      }
+      };
+      conn.on('close', markOffline);
+      conn.on('error', markOffline);
     });
 
     peer.on('error', (err: any) => {
       console.error('Host peer error:', err);
+      if (!roomOpened) cleanupPeer();
       if (err.type === 'unavailable-id') {
-        setErrorMessage(lang === 'vi' ? 'Phòng này đang được mở ở một màn hình Host khác.' : 'This room is already open on another Host screen.');
+        setErrorMessage(langRef.current === 'vi' ? 'Phòng này đang được mở ở một màn hình Host khác.' : 'This room is already open on another Host screen.');
         setIsLoading(false);
       } else {
-        setErrorMessage('Không thể khởi tạo phòng. Đang thử lại...');
+        setErrorMessage(langRef.current === 'vi' ? 'Không thể khởi tạo phòng. Hãy kiểm tra mạng rồi thử lại.' : 'Could not create the room. Check your connection and try again.');
         setIsLoading(false);
       }
     });
@@ -425,16 +374,13 @@ export const App: React.FC = () => {
   // ----------------------------------------------------
   // PLAYER: CONNECT / RECONNECT TO HOST
   // ----------------------------------------------------
-  const connectToHostAsPlayer = useCallback((
+  const connectToHostAsPlayer = useCallback(async function connectToHostAsPlayer(
     targetCode: string,
     nameToUse: string,
     pId: string,
     attemptCount = 0
-  ) => {
-    if (reconnectTimerRef.current) {
-      clearTimeout(reconnectTimerRef.current);
-      reconnectTimerRef.current = null;
-    }
+  ) {
+    cleanupPeer();
 
     if (attemptCount === 0) {
       setIsLoading(true);
@@ -444,25 +390,43 @@ export const App: React.FC = () => {
       setReconnectAttempt(attemptCount);
     }
 
-    const cleanCode = sanitizeRoomCode(targetCode);
-    const targetPeerId = `ccparty-${cleanCode.toLowerCase()}`;
-    const peer = new Peer({
-      debug: 1,
-      config: RTC_CONFIGURATION,
-    });
+    const targetPeerId = `ccparty-${targetCode.toLowerCase()}`;
+    const attempt = new AbortController();
+    connectionAttemptRef.current = attempt;
+    const config = await loadIceConfiguration(attempt.signal);
+    if (attempt.signal.aborted) return;
+    const peer = new Peer({ debug: 1, config });
+    peerRef.current = peer;
+    let joined = false;
 
-    let connTimeout: any = null;
+    const retry = () => {
+      if (attempt.signal.aborted) return;
+      cleanupPeer();
+      const retries = joined ? 0 : attemptCount;
+      if (retries >= MAX_CONNECTION_RETRIES) {
+        setIsReconnecting(false);
+        setIsLoading(false);
+        setErrorMessage(langRef.current === 'vi'
+          ? 'Không thể kết nối với Host. Hãy kiểm tra mã phòng, mạng và màn hình Host rồi thử lại.'
+          : 'Could not connect to the host. Check the room code, network, and host screen, then try again.');
+        setCurrentView('JOIN_FORM');
+        return;
+      }
+
+      setIsReconnecting(true);
+      setReconnectAttempt(retries + 1);
+      reconnectTimerRef.current = setTimeout(() => {
+        void connectToHostAsPlayer(targetCode, nameToUse, pId, retries + 1);
+      }, 2000 * (retries + 1));
+    };
+
+    const connTimeout = setTimeout(retry, 15000);
+    attempt.signal.addEventListener('abort', () => clearTimeout(connTimeout), { once: true });
 
     peer.on('open', () => {
       const conn = peer.connect(targetPeerId, { reliable: true });
 
-      connTimeout = setTimeout(() => {
-        console.warn('P2P connection timeout (12s) - retrying via ICE/TURN candidates');
-        handlePlayerDisconnect(cleanCode, nameToUse, pId, attemptCount);
-      }, 12000);
-
       conn.on('open', () => {
-        clearTimeout(connTimeout);
         playerConnRef.current = conn;
 
         conn.send({
@@ -473,8 +437,11 @@ export const App: React.FC = () => {
       });
 
       conn.on('data', (data) => {
+        if (attempt.signal.aborted) return;
         const msg = data as NetworkMessage;
+        const lang = langRef.current;
         if (msg.type === 'JOINED') {
+          joined = true;
           clearTimeout(connTimeout);
           setIsLoading(false);
           setIsReconnecting(false);
@@ -504,21 +471,12 @@ export const App: React.FC = () => {
             GAME_IN_PROGRESS: lang === 'vi' ? 'Ván chơi đã bắt đầu. Hãy chờ ván sau.' : 'A game is already in progress.',
             INVALID_NAME: lang === 'vi' ? 'Tên người chơi không hợp lệ.' : 'Invalid player name.',
           };
-          isKickedRef.current = true;
+          cleanupPeer();
           clearPlayerSession();
           setIsLoading(false);
           setIsReconnecting(false);
           setErrorMessage(messages[msg.reason]);
           setCurrentView('JOIN_FORM');
-        } else if (msg.type === 'NAME_CHANGED') {
-          if (msg.playerId === pId) {
-            setPlayerName(msg.newName);
-            savePlayerSession({
-              roomCode: cleanCode,
-              playerName: msg.newName,
-              playerId: pId,
-            });
-          }
         } else if (msg.type === 'HOST_STAGE_CHANGE') {
           if (msg.stage === 'WAITING' || msg.stage === 'LOBBY') {
             setGame1ClientState(null);
@@ -526,156 +484,32 @@ export const App: React.FC = () => {
             setCurrentView('PLAYER_WAITING');
           }
         } else if (msg.type === 'ROOM_CLOSED') {
+          cleanupPeer();
           clearPlayerSession();
           alert(lang === 'vi' ? 'Chủ phòng đã đóng phòng chơi.' : 'The host has closed the room.');
           setCurrentView('HOME');
         } else if (msg.type === 'KICKED') {
-          isKickedRef.current = true;
+          cleanupPeer();
           clearPlayerSession();
-          if (reconnectTimerRef.current) {
-            clearTimeout(reconnectTimerRef.current);
-            reconnectTimerRef.current = null;
-          }
-          try {
-            playerConnRef.current?.close();
-          } catch {}
-          try {
-            peerRef.current?.destroy();
-            peerRef.current = null;
-          } catch {}
           alert(lang === 'vi' ? 'Bạn đã bị Host mời ra khỏi phòng.' : 'You have been removed from the room by the Host.');
           setCurrentView('HOME');
         }
       });
 
-      conn.on('close', () => {
-        handlePlayerDisconnect(cleanCode, nameToUse, pId, attemptCount);
-      });
-
-      conn.on('error', () => {
-        handlePlayerDisconnect(cleanCode, nameToUse, pId, attemptCount);
-      });
+      conn.on('close', retry);
+      conn.on('error', retry);
     });
 
-    peer.on('error', (err: any) => {
-      clearTimeout(connTimeout);
-      console.warn('Player peer error:', err);
-
-      if (err?.type === 'peer-unavailable') {
-        if (attemptCount >= 2) {
-          setIsLoading(false);
-          setIsReconnecting(false);
-          setErrorMessage(
-            lang === 'vi'
-              ? `Không tìm thấy phòng chơi "${cleanCode}". Hãy kiểm tra lại mã phòng hoặc đảm bảo Host vẫn đang mở phòng!`
-              : `Room "${cleanCode}" not found. Please check room code or ensure Host is still open.`
-          );
-          clearPlayerSession();
-          setCurrentView('JOIN_FORM');
-          return;
-        }
-        reconnectTimerRef.current = setTimeout(() => {
-          cleanupPeer();
-          connectToHostAsPlayer(cleanCode, nameToUse, pId, attemptCount + 1);
-        }, 1200);
-        return;
-      }
-
-      handlePlayerDisconnect(cleanCode, nameToUse, pId, attemptCount);
-    });
-
-    peerRef.current = peer;
+    peer.on('error', retry);
   }, [cleanupPeer]);
 
-  const handlePlayerDisconnect = (
-    targetCode: string,
-    nameToUse: string,
-    pId: string,
-    currentAttempts: number
-  ) => {
-    if (isKickedRef.current) {
-      return;
-    }
-
-    if (currentAttempts >= 10) {
-      setIsReconnecting(false);
-      setIsLoading(false);
-      setErrorMessage(
-        lang === 'vi'
-          ? 'Không thể kết nối lại với Host sau nhiều lần thử. Vui lòng kiểm tra lại kết nối mạng hoặc thử vào lại phòng.'
-          : 'Unable to reconnect to Host after multiple attempts. Please check network connection or try again.'
-      );
-      clearPlayerSession();
-      setCurrentView('JOIN_FORM');
-      return;
-    }
-
-    setIsReconnecting(true);
-    setReconnectAttempt(currentAttempts + 1);
-
-    reconnectTimerRef.current = setTimeout(() => {
-      cleanupPeer();
-      connectToHostAsPlayer(targetCode, nameToUse, pId, currentAttempts + 1);
-    }, 2000);
-  };
-
   const handleJoinRoom = (code: string, name: string) => {
-    isKickedRef.current = false;
     clearHostSession();
-    clearPlayerSession();
+    const previousSession = getPlayerSession();
+    if (previousSession?.roomCode !== code || previousSession.playerName !== name) clearPlayerSession();
     const pId = getOrCreatePlayerId();
     connectToHostAsPlayer(code, name, pId, 0);
   };
-
-  const handleChangePlayerName = (newName: string) => {
-    const cleanName = newName.trim().slice(0, LOST_SPY_RULES.maxNameLength);
-    if (!cleanName || cleanName === playerName) return;
-
-    const pId = getOrCreatePlayerId();
-    setPlayerName(cleanName);
-    savePlayerSession({
-      roomCode,
-      playerName: cleanName,
-      playerId: pId,
-    });
-
-    if (playerConnRef.current && playerConnRef.current.open) {
-      playerConnRef.current.send({
-        type: 'CHANGE_NAME',
-        playerId: pId,
-        newName: cleanName,
-      } as NetworkMessage);
-    }
-  };
-
-  // Keep Host signaling connection alive across network changes / mobile wakeups
-  useEffect(() => {
-    const handleRecheckSignaling = () => {
-      if (peerRef.current && peerRef.current.disconnected && !peerRef.current.destroyed) {
-        console.log('Reconnecting PeerJS signaling session...');
-        try {
-          peerRef.current.reconnect();
-        } catch {}
-      }
-    };
-
-    window.addEventListener('online', handleRecheckSignaling);
-    document.addEventListener('visibilitychange', handleRecheckSignaling);
-
-    const interval = setInterval(() => {
-      if (peerRef.current && peerRef.current.disconnected && !peerRef.current.destroyed) {
-        try {
-          peerRef.current.reconnect();
-        } catch {}
-      }
-    }, 10000);
-
-    return () => {
-      window.removeEventListener('online', handleRecheckSignaling);
-      document.removeEventListener('visibilitychange', handleRecheckSignaling);
-      clearInterval(interval);
-    };
-  }, []);
 
   // ----------------------------------------------------
   // INITIAL LOAD & AUTO-RESTORE
@@ -683,14 +517,15 @@ export const App: React.FC = () => {
   useEffect(() => {
     const params = new URLSearchParams(window.location.search);
     const joinCode = params.get('join') || params.get('room');
+    const playerSession = getPlayerSession();
 
-    if (joinCode) {
+    if (joinCode && playerSession?.roomCode !== sanitizeRoomCode(joinCode)) {
       setRoomCode(sanitizeRoomCode(joinCode));
       setCurrentView('JOIN_FORM');
       return;
     }
 
-    const hostSession = getHostSession();
+    const hostSession = joinCode ? null : getHostSession();
     if (hostSession && hostSession.roomCode) {
       startHostRoom(
         hostSession.roomCode,
@@ -702,7 +537,6 @@ export const App: React.FC = () => {
       return;
     }
 
-    const playerSession = getPlayerSession();
     if (playerSession && playerSession.roomCode && playerSession.playerName) {
       setRoomCode(playerSession.roomCode);
       setPlayerName(playerSession.playerName);
@@ -730,7 +564,7 @@ export const App: React.FC = () => {
       if (document.visibilityState === 'visible') {
         const pSession = getPlayerSession();
         if (pSession && (currentViewRef.current === 'PLAYER_WAITING' || currentViewRef.current === 'PLAYER_GAME_SPY' || currentViewRef.current === 'PLAYER_GAME_SUITE')) {
-          if (!playerConnRef.current || !playerConnRef.current.open) {
+          if (!connectionAttemptRef.current && !reconnectTimerRef.current) {
             connectToHostAsPlayer(
               pSession.roomCode,
               pSession.playerName,
@@ -752,13 +586,15 @@ export const App: React.FC = () => {
   // GAME 1 LOGIC & ACTIONS (HOST CONTROLLER)
   // ----------------------------------------------------
   const startTheLostSpyGame = () => {
+    const words = hostGamesRef.current?.words;
+    if (!words) return;
     const activePlayers = players.filter((player) => player.isOnline !== false);
     if (activePlayers.length < LOST_SPY_RULES.minPlayers) {
       alert(`Game 1 (Điệp Viên Lạc Lối) cần ít nhất ${LOST_SPY_RULES.minPlayers} người đang kết nối. Hiện có ${activePlayers.length} người online.`);
       return;
     }
 
-    const wordPair = getRandomWordPair();
+    const wordPair = words.getRandomWordPair();
     const initialGameState = createGameState(activePlayers, wordPair);
 
     setGame1HostState(initialGameState);
@@ -910,7 +746,8 @@ export const App: React.FC = () => {
   };
 
   const handleGame1GuessWord = (pId: string, guess: string) => {
-    if (!game1HostStateRef.current) return;
+    const words = hostGamesRef.current?.words;
+    if (!game1HostStateRef.current || !words) return;
     const currentState = game1HostStateRef.current;
     const player = currentState.playerRoles[pId];
 
@@ -957,7 +794,7 @@ export const App: React.FC = () => {
       broadcastGame1State(updated);
     } else if (player.role === 'SPY') {
       // Gián điệp đoán từ khóa gốc (tiếng Việt hoặc tiếng Anh)
-      const isCorrect = checkGuessMatch(
+      const isCorrect = words.checkGuessMatch(
         guess,
         currentState.wordCivilian,
         currentState.wordCivilianEn
@@ -1169,7 +1006,9 @@ export const App: React.FC = () => {
       alert(lang === 'vi' ? `Cần ít nhất 4 người đang kết nối. Hiện có ${activePlayers.length}.` : `At least 4 connected players are required. Currently ${activePlayers.length}.`);
       return;
     }
-    const initial = createSuiteGame(gameId as SuiteGameId, activePlayers);
+    const suite = hostGamesRef.current?.suite;
+    if (!suite) return;
+    const initial = suite.createSuiteGame(gameId as SuiteGameId, activePlayers);
     setSuiteHostState(initial);
     suiteHostStateRef.current = initial;
     setCurrentView('HOST_GAME_SUITE');
@@ -1178,12 +1017,14 @@ export const App: React.FC = () => {
 
   const handleSuiteNext = () => {
     if (!suiteHostStateRef.current) return;
-    const updated = nextSuiteRound(suiteHostStateRef.current);
+    const updated = hostGamesRef.current?.suite.nextSuiteRound(suiteHostStateRef.current);
+    if (!updated) return;
     setSuiteHostState(updated); suiteHostStateRef.current = updated; broadcastSuiteState(updated);
   };
   const handleSuiteReplay = () => {
     if (!suiteHostStateRef.current) return;
-    const updated = createSuiteGame(suiteHostStateRef.current.gameId, suiteHostStateRef.current.players);
+    const updated = hostGamesRef.current?.suite.createSuiteGame(suiteHostStateRef.current.gameId, suiteHostStateRef.current.players);
+    if (!updated) return;
     setSuiteHostState(updated); suiteHostStateRef.current = updated; broadcastSuiteState(updated);
   };
   const handleSuitePlayerAction = (action: SuiteAction) => {
@@ -1233,6 +1074,9 @@ export const App: React.FC = () => {
   const handleLeavePlayerRoom = () => {
     clearPlayerSession();
     cleanupPeer();
+    setIsLoading(false);
+    setIsReconnecting(false);
+    setReconnectAttempt(0);
     setRoomCode('');
     setPlayerName('');
     setGame1ClientState(null);
@@ -1250,6 +1094,8 @@ export const App: React.FC = () => {
           lang={lang}
           onToggleLang={handleToggleLang}
           onCreateRoom={handleCreateRoom}
+          isCreatingRoom={isLoading}
+          errorMessage={errorMessage}
           onJoinRoom={() => {
             setErrorMessage('');
             setCurrentView('JOIN_FORM');
@@ -1312,6 +1158,7 @@ export const App: React.FC = () => {
           onJoin={handleJoinRoom}
           onBack={handleLeavePlayerRoom}
           isLoading={isLoading}
+          reconnectAttempt={isLoading && isReconnecting ? reconnectAttempt : 0}
           errorMessage={errorMessage}
         />
       );
@@ -1326,7 +1173,6 @@ export const App: React.FC = () => {
           isReconnecting={isReconnecting}
           reconnectAttempt={reconnectAttempt}
           onLeaveRoom={handleLeavePlayerRoom}
-          onChangeName={handleChangePlayerName}
         />
       );
 
@@ -1340,19 +1186,12 @@ export const App: React.FC = () => {
           playerName={playerName}
           onVote={handlePlayerVote}
           onGuessWord={handlePlayerGuessWord}
-          onChangeName={handleChangePlayerName}
         />
       ) : null;
 
     case 'PLAYER_GAME_SUITE':
       return suiteClientState ? (
-        <PlayerSuiteGame
-          state={suiteClientState}
-          lang={lang}
-          onToggleLang={handleToggleLang}
-          onAction={handleSuitePlayerAction}
-          onChangeName={handleChangePlayerName}
-        />
+        <PlayerSuiteGame state={suiteClientState} lang={lang} onToggleLang={handleToggleLang} onAction={handleSuitePlayerAction} />
       ) : null;
 
     default:
